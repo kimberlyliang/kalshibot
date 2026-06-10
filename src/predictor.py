@@ -1,141 +1,166 @@
 """
-Price direction predictor.
+BTC above-threshold probability estimator.
 
-Strategy: ensemble of three fast, interpretable signals.
-Each produces a probability that BTC is ABOVE a threshold at hour-end.
-Final probability = weighted average.
-
-Signals
--------
-1. Momentum (RSI + rate-of-change)      weight 0.35
-2. Mean-reversion (Bollinger band z-score)  weight 0.30
-3. Micro-structure (volume imbalance + candle body)  weight 0.35
+Core model: binary option pricing (lognormal diffusion) with drift.
+  drift=0  → pure vol model (original)
+  drift≠0  → drift_forecaster adds mean-reversion signal + GARCH/HAR vol
 """
 import math
+from datetime import datetime, timezone
+
 import numpy as np
 import pandas as pd
 
 
-# ── feature helpers ──────────────────────────────────────────────────────────
+# ── Volatility ────────────────────────────────────────────────────────────────
 
-def _rsi(closes: pd.Series, period: int = 14) -> float:
-    delta = closes.diff()
-    gain = delta.clip(lower=0).rolling(period).mean().iloc[-1]
-    loss = (-delta.clip(upper=0)).rolling(period).mean().iloc[-1]
-    if loss == 0:
-        return 100.0
-    rs = gain / loss
-    return 100 - 100 / (1 + rs)
-
-
-def _bollinger_z(closes: pd.Series, period: int = 20) -> float:
-    """Z-score of last close relative to BB mid."""
-    mid = closes.rolling(period).mean().iloc[-1]
-    std = closes.rolling(period).std().iloc[-1]
-    if std == 0:
-        return 0.0
-    return (closes.iloc[-1] - mid) / std
-
-
-def _roc(closes: pd.Series, period: int = 6) -> float:
-    """Rate of change over `period` candles (fraction)."""
-    if len(closes) < period + 1:
-        return 0.0
-    return (closes.iloc[-1] / closes.iloc[-(period + 1)] - 1)
-
-
-def _volume_momentum(df: pd.DataFrame, period: int = 6) -> float:
-    """Fraction of recent volume that is up-candles."""
-    recent = df.tail(period)
-    up_vol = recent.loc[recent["close"] >= recent["open"], "volume"].sum()
-    total_vol = recent["volume"].sum()
-    if total_vol == 0:
-        return 0.5
-    return up_vol / total_vol
-
-
-def _candle_body_bias(df: pd.DataFrame, period: int = 3) -> float:
-    """Average (close-open)/(high-low) over last `period` candles. +1 = all bull."""
-    recent = df.tail(period)
-    ranges = (recent["high"] - recent["low"]).replace(0, np.nan)
-    bodies = (recent["close"] - recent["open"]) / ranges
-    return float(bodies.mean())
-
-
-# ── probability converters ────────────────────────────────────────────────────
-
-def _sigmoid(x: float, scale: float = 1.0) -> float:
-    return 1 / (1 + math.exp(-scale * x))
-
-
-# ── main predictor ────────────────────────────────────────────────────────────
-
-WEIGHTS = {"momentum": 0.35, "mean_rev": 0.30, "micro": 0.35}
-
-
-def predict_above_threshold(df: pd.DataFrame, threshold: float, current_price: float) -> dict:
+def realized_vol_hourly(df: pd.DataFrame, window: int = 12) -> float:
     """
+    Annualized realized volatility from the last `window` hourly log-returns.
+    Returns a fraction, e.g. 0.60 = 60% annualized vol.
+    """
+    closes = df["close"].tail(window + 1)
+    log_returns = np.log(closes / closes.shift(1)).dropna()
+    if len(log_returns) < 2:
+        return 0.80  # fallback: high vol assumption (conservative)
+    hourly_vol = float(log_returns.std())
+    annualized = hourly_vol * math.sqrt(8760)  # 8760 hours/year
+    return max(annualized, 0.10)  # floor at 10% annualized
+
+
+def vol_over_horizon(annualized_vol: float, hours_remaining: float) -> float:
+    """Convert annualized vol to vol over the remaining horizon."""
+    years = hours_remaining / 8760
+    return annualized_vol * math.sqrt(years)
+
+
+# ── Binary option probability (log-normal model) ─────────────────────────────
+
+def prob_above_lognormal(
+    spot: float,
+    strike: float,
+    sigma_horizon: float,
+    drift: float = 0.0,
+) -> float:
+    """
+    P(S_T > K) under log-normal diffusion.
+
+    sigma_horizon: vol scaled to the remaining time horizon (not annualized)
+    drift: expected log-return over horizon (default 0 = risk-neutral / no view)
+
+    This is N(d2) from Black-Scholes for a binary call.
+    """
+    if sigma_horizon <= 0:
+        return 1.0 if spot > strike else 0.0
+    d2 = (math.log(spot / strike) + drift - 0.5 * sigma_horizon ** 2) / sigma_horizon
+    return _norm_cdf(d2)
+
+
+def _norm_cdf(x: float) -> float:
+    return (1 + math.erf(x / math.sqrt(2))) / 2
+
+
+# ── Momentum adjustment ───────────────────────────────────────────────────────
+
+def momentum_adjustment(df: pd.DataFrame, weight: float = 0.04) -> float:
+    """
+    Small drift adjustment based on short-term momentum.
+    Returns a log-return adjustment to add to the drift parameter.
+    Capped at ±weight to keep it from dominating the base probability.
+    """
+    closes = df["close"]
+    if len(closes) < 4:
+        return 0.0
+    # 3-candle momentum: log return over last 3 hours
+    mom = math.log(float(closes.iloc[-1]) / float(closes.iloc[-4]))
+    # Dampen heavily — momentum is weak at 1h horizon
+    return float(np.clip(mom * 0.15, -weight, weight))
+
+
+# ── Main entry point ──────────────────────────────────────────────────────────
+
+def predict_above_threshold(
+    df: pd.DataFrame,
+    strike: float,
+    current_price: float,
+    expiry_utc: datetime | None = None,
+    use_forecaster: bool = True,
+) -> dict:
+    """
+    Estimate P(BTC > strike at hour-end).
+
     Parameters
     ----------
-    df : hourly candles DataFrame (columns: open/high/low/close/volume)
-    threshold : the Kalshi contract strike price in USD
-    current_price : live BTC spot price
+    df             : hourly OHLCV DataFrame
+    strike         : contract strike price in USD
+    current_price  : live BTC spot price
+    expiry_utc     : contract expiry (UTC); defaults to next hour top
+    use_forecaster : if True, use GARCH vol + drift model (recommended)
+                     if False, use original rolling vol + tiny momentum nudge
 
     Returns
     -------
-    dict with keys: prob_above, signals, confidence
+    dict with prob_above, drift, vol, confidence, and full signal breakdown
     """
-    closes = df["close"]
+    from src.drift_forecaster import forecast as drift_forecast
 
-    # 1. Momentum signal
-    rsi = _rsi(closes)
-    roc = _roc(closes)
-    # RSI > 50 → bullish; map [0,100] → [-1,1] then sigmoid
-    rsi_score = (rsi - 50) / 50
-    roc_score = roc / 0.02  # 2% move = 1 SD rough estimate
-    momentum_raw = 0.6 * rsi_score + 0.4 * roc_score
-    p_momentum = _sigmoid(momentum_raw, scale=1.5)
+    now = datetime.now(timezone.utc)
+    if expiry_utc is None:
+        expiry_utc = now.replace(minute=0, second=0, microsecond=0)
+        expiry_utc = expiry_utc.replace(hour=(now.hour + 1) % 24)
 
-    # 2. Mean-reversion signal
-    bz = _bollinger_z(closes)
-    # Extreme high z → likely to fall; invert
-    p_mean_rev = _sigmoid(-bz, scale=0.8)
+    hours_remaining = max((expiry_utc - now).total_seconds() / 3600, 1 / 60)
 
-    # Blend: if price well above threshold already, weight momentum less
-    price_gap_pct = (current_price - threshold) / threshold
-    if abs(price_gap_pct) > 0.02:
-        # Strong directional prior from price level
-        level_prior = _sigmoid(price_gap_pct * 50)
-        p_mean_rev = 0.5 * p_mean_rev + 0.5 * level_prior
+    if use_forecaster:
+        fc = drift_forecast(df)
+        vol_ann    = fc["vol_ann"]
+        # Scale drift to the remaining horizon (drift is per-hour, scale linearly)
+        drift      = fc["drift_logret"] * hours_remaining
+        drift_conf = fc["confidence"]
+        vol_source = fc["vol_source"]
+        fc_features = fc["features"]
+    else:
+        vol_ann    = realized_vol_hourly(df)
+        drift      = momentum_adjustment(df)
+        drift_conf = 0.0
+        vol_source = "rolling"
+        fc_features = {}
 
-    # 3. Micro-structure signal
-    vol_mom = _volume_momentum(df)
-    body_bias = _candle_body_bias(df)
-    micro_raw = 0.5 * (vol_mom - 0.5) * 2 + 0.5 * body_bias
-    p_micro = _sigmoid(micro_raw, scale=2.0)
+    sigma_h = vol_over_horizon(vol_ann, hours_remaining)
 
-    # Ensemble
-    prob = (
-        WEIGHTS["momentum"] * p_momentum
-        + WEIGHTS["mean_rev"] * p_mean_rev
-        + WEIGHTS["micro"] * p_micro
+    prob = prob_above_lognormal(
+        spot=current_price,
+        strike=strike,
+        sigma_horizon=sigma_h,
+        drift=drift,
     )
 
-    # Confidence: how far from 0.5 the signals agree
-    probs = [p_momentum, p_mean_rev, p_micro]
-    agreement = 1 - np.std(probs) * 4  # 0 = total disagreement, 1 = perfect
-    confidence = float(np.clip(agreement, 0, 1))
+    buffer_pct = (current_price - strike) / strike * 100
+
+    if sigma_h > 0:
+        z = math.log(current_price / strike) / sigma_h
+    else:
+        z = 10.0
+    confidence = float(np.clip((z - 0.5) / 2.0, 0.0, 1.0))
 
     return {
-        "prob_above": float(np.clip(prob, 0.02, 0.98)),
+        "prob_above":      round(float(np.clip(prob, 0.01, 0.99)), 4),
+        "buffer_pct":      round(buffer_pct, 3),
+        "vol_ann_pct":     round(vol_ann * 100, 1),
+        "vol_source":      vol_source,
+        "hours_remaining": round(hours_remaining, 3),
+        "sigma_horizon":   round(sigma_h, 5),
+        "drift_logret":    round(drift, 6),
+        "drift_pct":       round(drift * 100, 4),
+        "drift_confidence":round(drift_conf, 3),
+        "confidence":      round(confidence, 3),
         "signals": {
-            "momentum": round(p_momentum, 3),
-            "mean_rev": round(p_mean_rev, 3),
-            "micro": round(p_micro, 3),
-            "rsi": round(rsi, 1),
-            "roc_pct": round(roc * 100, 2),
-            "boll_z": round(bz, 2),
-            "vol_mom": round(vol_mom, 3),
+            "z_score":      round(z, 3),
+            "buffer_pct":   round(buffer_pct, 3),
+            "vol_ann_pct":  round(vol_ann * 100, 1),
+            "vol_source":   vol_source,
+            "drift_pct":    round(drift * 100, 4),
+            "drift_conf":   round(drift_conf, 3),
+            **fc_features,
         },
-        "confidence": round(confidence, 3),
     }

@@ -12,6 +12,9 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config.settings import KALSHI_BASE_URL, KALSHI_KEY_ID, KALSHI_PRIVATE_KEY_PATH
 
+# The path prefix that must be included in the signature (full URL path, not just the resource)
+_BASE_PATH = "/trade-api/v2"
+
 
 def _load_private_key():
     pem = Path(KALSHI_PRIVATE_KEY_PATH).read_bytes()
@@ -21,7 +24,8 @@ def _load_private_key():
 def _sign_request(method: str, path: str) -> dict:
     """Return the three Kalshi auth headers for a request."""
     ts_ms = str(int(time.time() * 1000))
-    message = (ts_ms + method.upper() + path).encode()
+    full_path = _BASE_PATH + path  # e.g. /trade-api/v2/portfolio/balance
+    message = (ts_ms + method.upper() + full_path).encode()
     key = _load_private_key()
     sig = key.sign(
         message,
@@ -44,22 +48,51 @@ class KalshiClient:
         self.base = KALSHI_BASE_URL
         self.http = httpx.Client(timeout=10)
 
+    @staticmethod
+    def _handle_http_error(err: httpx.HTTPStatusError) -> None:
+        r = err.response
+        request_id = r.headers.get("x-request-id", "")
+        content_type = (r.headers.get("content-type") or "").lower()
+        body = ""
+        try:
+            if "application/json" in content_type:
+                body = str(r.json())
+            else:
+                body = r.text
+        except Exception:
+            body = "<unable to parse response body>"
+
+        raise RuntimeError(
+            f"HTTP {r.status_code} for {r.request.method} {r.request.url}"
+            f" | request_id={request_id or 'n/a'}"
+            f" | body={body}"
+        ) from err
+
     def _get(self, path: str, params: dict | None = None):
         headers = _sign_request("GET", path)
         r = self.http.get(self.base + path, headers=headers, params=params)
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            self._handle_http_error(e)
         return r.json()
 
     def _post(self, path: str, body: dict):
         headers = _sign_request("POST", path)
         r = self.http.post(self.base + path, headers=headers, json=body)
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            self._handle_http_error(e)
         return r.json()
 
     def _delete(self, path: str):
         headers = _sign_request("DELETE", path)
         r = self.http.delete(self.base + path, headers=headers)
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            self._handle_http_error(e)
         return r.json()
 
     # --- Market data ---
@@ -71,7 +104,7 @@ class KalshiClient:
         return self._get("/markets", params)["markets"]
 
     def get_orderbook(self, ticker: str, depth: int = 5) -> dict:
-        return self._get(f"/markets/{ticker}/orderbook", {"depth": depth})["orderbook"]
+        return self._get(f"/markets/{ticker}/orderbook", {"depth": depth})["orderbook_fp"]
 
     def get_candlesticks(self, ticker: str, period_seconds: int = 3600) -> list[dict]:
         return self._get(f"/markets/{ticker}/candlesticks", {"period_seconds": period_seconds})["candlesticks"]
@@ -90,20 +123,47 @@ class KalshiClient:
     def place_order(
         self,
         ticker: str,
-        side: str,        # "yes" or "no"
+        side: str,           # "yes" or "no"
         contracts: int,
-        price_cents: int,  # 1–99
+        price_dollars: float,
+        action: str = "buy", # "buy" or "sell"
         order_type: str = "limit",
     ) -> dict:
+        """
+        Place a buy or sell order.
+
+        Buy YES  at P: pay P, receive $1 if YES wins
+        Sell YES at P: receive P, pay $1 if YES wins  (= short YES = synthetic NO)
+        Buy NO   at P: pay P, receive $1 if NO wins
+        Sell NO  at P: receive P, pay $1 if NO wins   (= short NO = synthetic YES)
+
+        Kalshi API always uses yes_price (0.01–0.99):
+          buy/sell YES → yes_price = price_dollars
+          buy/sell NO  → yes_price = 1 - price_dollars
+        """
+        yes_price = price_dollars if side == "yes" else round(1.0 - price_dollars, 2)
+        yes_price = round(yes_price, 2)
         body = {
-            "ticker": ticker,
-            "action": "buy",
-            "side": side,
-            "type": order_type,
-            "count": contracts,
-            "yes_price": price_cents if side == "yes" else 100 - price_cents,
+            "ticker":    ticker,
+            "action":    action,
+            "side":      side,
+            "type":      order_type,
+            "count":     contracts,
+            "yes_price": str(yes_price),
         }
         return self._post("/orders", body)
+
+    def sell_yes(self, ticker: str, contracts: int,
+                 price_dollars: float) -> dict:
+        """Shorthand: sell YES (collect premium, pay $1 if YES wins)."""
+        return self.place_order(ticker, "yes", contracts,
+                                price_dollars, action="sell")
+
+    def sell_no(self, ticker: str, contracts: int,
+                price_dollars: float) -> dict:
+        """Shorthand: sell NO (collect premium, pay $1 if NO wins)."""
+        return self.place_order(ticker, "no", contracts,
+                                price_dollars, action="sell")
 
     def cancel_order(self, order_id: str) -> dict:
         return self._delete(f"/orders/{order_id}")
