@@ -2,9 +2,21 @@
 # Wrapper script for cron — ensures correct Python env and working directory.
 # Cron runs with a bare environment, so we source conda and the .env explicitly.
 
-BOT_DIR="/Users/kimberly/Documents/kalshi-btc-bot"
-PYTHON="/Users/kimberly/miniconda3/bin/python3"
-LOG="$BOT_DIR/logs/cron.log"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/.env"
+
+# Load BOT_DIR / PYTHON / LOG from .env if present.
+if [ -f "$ENV_FILE" ]; then
+    set -a
+    . "$ENV_FILE"
+    set +a
+fi
+
+# Safe fallbacks if .env is missing values.
+BOT_DIR="${BOT_DIR:-$SCRIPT_DIR}"
+PYTHON="${PYTHON:-python3}"
+LOG="${LOG:-$BOT_DIR/logs/cron.log}"
 
 # Rotate log if > 5MB
 if [ -f "$LOG" ] && [ $(stat -f%z "$LOG" 2>/dev/null || stat -c%s "$LOG") -gt 5242880 ]; then

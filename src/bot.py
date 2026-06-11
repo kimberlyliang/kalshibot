@@ -15,6 +15,7 @@ Usage:
 import argparse
 import json
 import logging
+import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -111,6 +112,24 @@ def _nearest_expiry(markets: list[dict]) -> datetime | None:
     return future[0] if future else None
 
 
+def _filter_markets_closing_within(markets: list[dict], minutes: float) -> list[dict]:
+    """Keep only markets whose close_time is within the next `minutes` minutes."""
+    now = datetime.now(timezone.utc)
+    out: list[dict] = []
+    for market in markets:
+        close_time = market.get("close_time")
+        if not close_time:
+            continue
+        try:
+            expiry = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        mins_remaining = (expiry - now).total_seconds() / 60
+        if 0 <= mins_remaining <= minutes:
+            out.append(market)
+    return out
+
+
 # ═══════════════════════════════════════════════════════════════
 # Strategy runners
 # ═══════════════════════════════════════════════════════════════
@@ -153,12 +172,14 @@ def run_no_otm(client, markets_by_series, df, spot, state, phase, cash, dry_run)
         )
 
         if dry_run:
+            # dont place order dry run
             log.info("    [DRY RUN]")
             _mark_traded(opp["ticker"], expiry_str)
             cash[0] -= cost
             continue
 
         try:
+            # place order
             r = client.place_order(opp["ticker"], opp["side"], n,
                                    price_dollars=opp["price"])
             log.info(f"    ✓ {r.get('order', {}).get('order_id', r)}")
@@ -356,8 +377,10 @@ def run(dry_run: bool = False):
     # ── Markets + phase ───────────────────────────────────────────
     markets_kxbtc  = client.get_markets(series_ticker="KXBTC",  status="open")
     markets_kxbtcd = client.get_markets(series_ticker="KXBTCD", status="open")
+    #markets_kxbtc15m = client.get_markets(series_ticker="KXBTC15M", status="open")
+    #markets_kxbtc15m = _filter_markets_closing_within(markets_kxbtc15m, minutes=15)
     markets = markets_kxbtc + markets_kxbtcd  # combined for phase detection
-    markets_by_series = {"KXBTC": markets_kxbtc, "KXBTCD": markets_kxbtcd}
+    markets_by_series = {"KXBTC": markets_kxbtc, "KXBTCD": markets_kxbtcd, "KXBTC15M": markets_kxbtc15m}
     expiry  = _nearest_expiry(markets)
 
     if expiry is None:
