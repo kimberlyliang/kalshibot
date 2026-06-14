@@ -19,7 +19,6 @@ def _pick_time_column(df: pd.DataFrame) -> str:
         'No timestamp column found. Expected one of: date, open_time, timestamp, time, datetime'
     )
 
-
 class Dataset_ETT_hour(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='ETTh1.csv',
@@ -264,7 +263,6 @@ class Dataset_Custom(Dataset):
             df_data = df_raw[cols_data]
         elif self.features == 'S':
             df_data = df_raw[[self.target]]
-
         if self.scale:
             train_data = df_data[border1s[0]:border2s[0]]
             self.scaler.fit(train_data.values)

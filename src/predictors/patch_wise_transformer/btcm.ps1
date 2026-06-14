@@ -45,7 +45,7 @@ python -u $runFile `
   --dec_in 5 `
   --c_out 1 `
   --e_layers 3 `
-  --n_heads 4 `
+  --n_heads 6 `
   --d_model 64 `
   --d_ff 256 `
   --dropout 0.1 `

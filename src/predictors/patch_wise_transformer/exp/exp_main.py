@@ -47,9 +47,23 @@ class Exp_Main(Exp_Basic):
         model_optim = optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
         return model_optim
 
-    def _select_criterion(self):
-        criterion = nn.MSELoss()
-        return criterion
+    def _select_criterion(self, loss_type="mse"):
+        loss_type = loss_type.lower()
+
+        if loss_type == "mse":
+            return nn.MSELoss()
+
+        elif loss_type == "mae":
+            return nn.L1Loss()
+
+        elif loss_type in ["huber", "smoothl1", "smooth_l1"]:
+            return nn.SmoothL1Loss(beta=1.0)
+
+        else:
+            raise ValueError(
+                f"Invalid loss type: {loss_type}. "
+                "Choose from: mse, mae, huber"
+            )
 
     def vali(self, vali_data, vali_loader, criterion):
         total_loss = []
