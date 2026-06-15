@@ -4,3 +4,5 @@ numpy>=1.26
 torch>=2.5
 cryptography>=42.0
 tqdm>=4.67.1
+matplotlib
+scikit-learn

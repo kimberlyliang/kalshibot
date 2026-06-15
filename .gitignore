@@ -14,6 +14,16 @@ data/
 .ruff_cache/
 .ipynb_checkpoints/
 
+# Model artifacts
+src/predictors/patch_wise_transformer/checkpoints/
+src/predictors/patch_wise_transformer/results/
+#src/predictors/patch_wise_transformer/test_results/
+
+# Python bytecode/cache (recursive)
+**/__pycache__/
+*.py[cod]
+
+
 # Virtual environments
 .venv/
 venv/

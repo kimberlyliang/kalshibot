@@ -17,10 +17,10 @@ data_path_name="data/btc_minutes_100000.csv"
 target_name="close"
 freq_name="min"                            # minute frequency
 
-# 120-minute context -> 60-minute forecast
+# 120-minute context -> 1-minute forecast
 seq_len=120
-label_len=60
-pred_len=60
+label_len=1
+pred_len=1
 
 random_seed=2021
 
@@ -50,7 +50,7 @@ python -u "$SCRIPT_DIR/run_longExp.py" \
   --head_dropout 0.1 \
   --patch_len 30 \ 
   --stride 15 \
-  --des "BTCM_120to60" \
+  --des "BTCM_120to1" \
   --train_epochs 20 \
   --itr 1 \
   --batch_size 128 \
