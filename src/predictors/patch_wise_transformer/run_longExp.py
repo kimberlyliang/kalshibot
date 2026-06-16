@@ -37,6 +37,9 @@ if __name__ == '__main__':
     parser.add_argument('--horizon', type=int, default=1, help='horizon')
 
     parser.add_argument('--log_return', type=bool, default=False, help='log return')
+    parser.add_argument('--plot_chunk_size', type=int, default=100, help='test plot chunk size')
+    parser.add_argument('--plot_chunk_starts', type=str, default='0,1000',
+                        help='comma-separated test plot chunk start indices')
     # DLinear
     #parser.add_argument('--individual', action='store_true', default=False, help='DLinear: a linear layer for each variate(channel) individually')
 

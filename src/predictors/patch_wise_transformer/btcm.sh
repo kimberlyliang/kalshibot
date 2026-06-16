@@ -50,13 +50,14 @@ python -u "$SCRIPT_DIR/run_longExp.py" \
   --dropout 0.05 \
   --fc_dropout 0.05 \
   --head_dropout 0.1 \
-  --patch_len 16 \
-  --stride 8 \
-  --des "BTCM_240to30to1_mse_more_features_and_log_return" \
+  --patch_len 4 \
+  --stride 2 \
+  --des "BTCM_240to1_mse_more_features_and_log_return_60" \
   --train_epochs 10 \
   --itr 1 \
   --batch_size 128 \
   --learning_rate 0.0001 \
   --log_return True \
   --loss "mse" \
+  --patience 5 \
   > "$LOG_DIR/${model_name}_${model_id_name}_${seq_len}_${pred_len}.log"

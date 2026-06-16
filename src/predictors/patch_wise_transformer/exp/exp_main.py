@@ -75,10 +75,49 @@ class Exp_Main(Exp_Basic):
             return raw_target
 
         reconstructed = []
+        # go through each sample in the batch
         for sample_offset in range(raw_target.shape[0]):
             last_close = dataset.get_last_raw_close(sample_start_idx + sample_offset)
+            # multiply the last close price by the exponential of the log return
             reconstructed.append((last_close * np.exp(raw_target[sample_offset, :, 0]))[:, None])
         return np.stack(reconstructed, axis=0)
+
+    def _save_series_plot(self, true, pred, path, title, ylabel):
+        plt.figure(figsize=(14, 5))
+        plt.plot(true, label='Actual', linewidth=2, color='black')
+        plt.plot(pred, label='Prediction', linewidth=1.5, color='red', linestyle='--', alpha=0.9)
+        plt.title(title)
+        plt.xlabel('Test Sample Index')
+        plt.ylabel(ylabel)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(path, bbox_inches='tight')
+        plt.close()
+
+    def _save_chunk_plots(self, true, pred, folder_path, suffix, ylabel):
+        chunk_size = max(1, int(getattr(self.args, 'plot_chunk_size', 100)))
+        raw_starts = getattr(self.args, 'plot_chunk_starts', '0,1000')
+        starts = []
+        for piece in str(raw_starts).split(','):
+            piece = piece.strip()
+            if not piece:
+                continue
+            try:
+                starts.append(int(piece))
+            except ValueError:
+                continue
+
+        for start in starts:
+            if start < 0 or start >= len(true):
+                continue
+            end = min(start + chunk_size, len(true))
+            self._save_series_plot(
+                true[start:end],
+                pred[start:end],
+                os.path.join(folder_path, f'{suffix}_{start}_{end}.pdf'),
+                f'{suffix} Test Samples {start}-{end}',
+                ylabel
+            )
 
     def _select_criterion(self, loss_type="mse"):
         loss_type = loss_type.lower()
@@ -337,13 +376,9 @@ class Exp_Main(Exp_Basic):
                     pd = np.concatenate((input[0, :, -1], pred[0, :, -1]), axis=0)
                     visual(gt, pd, os.path.join(folder_path, str(i) + 'z_score.pdf'))
 
-                    if log_return:
-                        input_raw = test_data.get_raw_close_history(sample_start_idx)
-                        gt_raw = np.concatenate((input_raw, true_raw[0, :, 0]), axis=0)
-                        pd_raw = np.concatenate((input_raw, pred_raw[0, :, 0]), axis=0)
-                    else:
-                        gt_raw = np.concatenate((test_data.get_raw_close_history(sample_start_idx), true_raw[0, :, 0]), axis=0)
-                        pd_raw = np.concatenate((test_data.get_raw_close_history(sample_start_idx), pred_raw[0, :, 0]), axis=0)
+                    input_raw = test_data.get_raw_close_history(sample_start_idx)
+                    gt_raw = np.concatenate((input_raw, true_raw[0, :, 0]), axis=0)
+                    pd_raw = np.concatenate((input_raw, pred_raw[0, :, 0]), axis=0)
 
                     # save raw-price PDF
                     visual(gt_raw, pd_raw, os.path.join(folder_path, str(i) + '_raw.pdf'))
@@ -370,6 +405,8 @@ class Exp_Main(Exp_Basic):
 
         metric_preds = preds_raw if log_return else self._inverse_target_values(test_data, preds)
         metric_trues = trues_raw if log_return else self._inverse_target_values(test_data, trues)
+        target_preds = self._inverse_target_values(test_data, preds)
+        target_trues = self._inverse_target_values(test_data, trues)
         mae, mse, rmse, mape, mspe, rse, corr = metric(metric_preds, metric_trues)
         print('mse:{}, mae:{}, rse:{}'.format(mse, mae, rse))
         f = open("result.txt", 'a')
@@ -379,10 +416,44 @@ class Exp_Main(Exp_Basic):
         f.write('\n')
         f.close()
 
-        visual(
+        self._save_series_plot(
             metric_trues[:, 0, 0],
             metric_preds[:, 0, 0],
-            os.path.join(folder_path, 'entire_test_set_raw.pdf')
+            os.path.join(folder_path, 'entire_test_set_raw.pdf'),
+            'Entire Test Set Raw Price',
+            'Price'
+        )
+
+        self._save_series_plot(
+            target_trues[:, 0, 0],
+            target_preds[:, 0, 0],
+            os.path.join(folder_path, 'entire_test_set_target.pdf'),
+            'Entire Test Set Target',
+            'Log Return' if log_return else 'Target Value'
+        )
+
+        self._save_series_plot(
+            target_trues[:, 0, 0] - target_preds[:, 0, 0],
+            np.zeros_like(target_preds[:, 0, 0]),
+            os.path.join(folder_path, 'entire_test_set_error.pdf'),
+            'Entire Test Set Prediction Error',
+            'Error'
+        )
+
+        self._save_chunk_plots(
+            metric_trues[:, 0, 0],
+            metric_preds[:, 0, 0],
+            folder_path,
+            'chunk_raw',
+            'Price'
+        )
+
+        self._save_chunk_plots(
+            target_trues[:, 0, 0],
+            target_preds[:, 0, 0],
+            folder_path,
+            'chunk_target',
+            'Log Return' if log_return else 'Target Value'
         )
 
         # np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe,rse, corr]))

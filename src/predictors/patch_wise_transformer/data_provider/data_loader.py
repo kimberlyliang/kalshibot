@@ -254,6 +254,8 @@ class Dataset_Custom(Dataset):
         border2s = [num_train, num_train + num_vali, len(df_raw)]
         border1 = border1s[self.set_type]
         border2 = border2s[self.set_type]
+        self.border1 = border1
+        self.border2 = border2
 
         if self.features == 'M' or self.features == 'MS':
             #cols_data = df_raw.columns[1:]
@@ -265,6 +267,7 @@ class Dataset_Custom(Dataset):
         elif self.features == 'S':
             df_data = df_raw[[self.target]]
         self.target_idx = df_data.columns.get_loc(self.target)
+        # store the raw close prices to use later if we did a log return
         self.raw_close = df_raw['close'].astype(np.float32).to_numpy()
         if self.scale:
             train_data = df_data[border1s[0]:border2s[0]]
@@ -340,10 +343,12 @@ class Dataset_Custom(Dataset):
         return values * self.scaler.scale_[self.target_idx] + self.scaler.mean_[self.target_idx]
 
     def get_raw_close_history(self, index):
-        return self.raw_close[index:index + self.seq_len]
+        global_start = self.border1 + index
+        return self.raw_close[global_start:global_start + self.seq_len]
 
     def get_last_raw_close(self, index):
-        return float(self.raw_close[index + self.seq_len - 1])
+        global_idx = self.border1 + index + self.seq_len - 1
+        return float(self.raw_close[global_idx])
     
 
 class Dataset_Pred(Dataset):
