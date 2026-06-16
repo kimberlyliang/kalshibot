@@ -47,6 +47,39 @@ class Exp_Main(Exp_Basic):
         model_optim = optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
         return model_optim
 
+    def _resolve_checkpoint_path(self, setting):
+        checkpoint_path = getattr(self.args, 'checkpoint_path', '')
+        if checkpoint_path:
+            if os.path.isdir(checkpoint_path):
+                return os.path.join(checkpoint_path, 'checkpoint.pth')
+            return checkpoint_path
+        return os.path.join(self.args.checkpoints, setting, 'checkpoint.pth')
+
+    def _inverse_target_values(self, dataset, values):
+        if hasattr(dataset, 'inverse_transform_target'):
+            shape = values.shape
+            restored = dataset.inverse_transform_target(values.reshape(-1, shape[-1]))
+            return restored.reshape(shape)
+
+        n_features = len(dataset.scaler.mean_)
+        target_idx = n_features - 1
+        flat = values.reshape(-1)
+        full = np.zeros((flat.shape[0], n_features), dtype=np.float32)
+        full[:, target_idx] = flat
+        restored = dataset.inverse_transform(full)[:, target_idx]
+        return restored.reshape(values.shape)
+
+    def _to_raw_price_targets(self, dataset, sample_start_idx, values):
+        raw_target = self._inverse_target_values(dataset, values)
+        if not getattr(self.args, 'log_return', False):
+            return raw_target
+
+        reconstructed = []
+        for sample_offset in range(raw_target.shape[0]):
+            last_close = dataset.get_last_raw_close(sample_start_idx + sample_offset)
+            reconstructed.append((last_close * np.exp(raw_target[sample_offset, :, 0]))[:, None])
+        return np.stack(reconstructed, axis=0)
+
     def _select_criterion(self, loss_type="mse"):
         loss_type = loss_type.lower()
 
@@ -231,14 +264,18 @@ class Exp_Main(Exp_Basic):
         return self.model
 
     def test(self, setting, test=0):
+        log_return = self.args.log_return
         test_data, test_loader = self._get_data(flag='test')
         
         if test:
-            print('loading model')
-            self.model.load_state_dict(torch.load(os.path.join('./checkpoints/' + setting, 'checkpoint.pth')))
+            checkpoint_path = self._resolve_checkpoint_path(setting)
+            print(f'loading model from {checkpoint_path}')
+            self.model.load_state_dict(torch.load(checkpoint_path))
 
         preds = []
         trues = []
+        preds_raw = []
+        trues_raw = []
         inputx = []
         folder_path = './test_results/' + setting + '/'
         if not os.path.exists(folder_path):
@@ -285,9 +322,14 @@ class Exp_Main(Exp_Basic):
 
                 pred = outputs  # outputs.detach().cpu().numpy()  # .squeeze()
                 true = batch_y  # batch_y.detach().cpu().numpy()  # .squeeze()
+                sample_start_idx = i * test_loader.batch_size
+                pred_raw = self._to_raw_price_targets(test_data, sample_start_idx, pred)
+                true_raw = self._to_raw_price_targets(test_data, sample_start_idx, true)
 
                 preds.append(pred)
                 trues.append(true)
+                preds_raw.append(pred_raw)
+                trues_raw.append(true_raw)
                 inputx.append(batch_x.detach().cpu().numpy())
                 if i % 20 == 0:
                     input = batch_x.detach().cpu().numpy()
@@ -295,15 +337,13 @@ class Exp_Main(Exp_Basic):
                     pd = np.concatenate((input[0, :, -1], pred[0, :, -1]), axis=0)
                     visual(gt, pd, os.path.join(folder_path, str(i) + 'z_score.pdf'))
 
-                    # Use the exact dataset scaler via inverse_transform (same path used in preprocessing).
-                    n_features = len(test_data.scaler.mean_)
-                    target_idx = n_features - 1
-                    gt_full = np.zeros((gt.shape[0], n_features), dtype=np.float32)
-                    pd_full = np.zeros((pd.shape[0], n_features), dtype=np.float32)
-                    gt_full[:, target_idx] = gt
-                    pd_full[:, target_idx] = pd
-                    gt_raw = test_data.inverse_transform(gt_full)[:, target_idx]
-                    pd_raw = test_data.inverse_transform(pd_full)[:, target_idx]
+                    if log_return:
+                        input_raw = test_data.get_raw_close_history(sample_start_idx)
+                        gt_raw = np.concatenate((input_raw, true_raw[0, :, 0]), axis=0)
+                        pd_raw = np.concatenate((input_raw, pred_raw[0, :, 0]), axis=0)
+                    else:
+                        gt_raw = np.concatenate((test_data.get_raw_close_history(sample_start_idx), true_raw[0, :, 0]), axis=0)
+                        pd_raw = np.concatenate((test_data.get_raw_close_history(sample_start_idx), pred_raw[0, :, 0]), axis=0)
 
                     # save raw-price PDF
                     visual(gt_raw, pd_raw, os.path.join(folder_path, str(i) + '_raw.pdf'))
@@ -314,17 +354,23 @@ class Exp_Main(Exp_Basic):
         preds = np.array(preds)
         trues = np.array(trues)
         inputx = np.array(inputx)
+        preds_raw = np.array(preds_raw)
+        trues_raw = np.array(trues_raw)
 
         preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
         trues = trues.reshape(-1, trues.shape[-2], trues.shape[-1])
         inputx = inputx.reshape(-1, inputx.shape[-2], inputx.shape[-1])
+        preds_raw = preds_raw.reshape(-1, preds_raw.shape[-2], preds_raw.shape[-1])
+        trues_raw = trues_raw.reshape(-1, trues_raw.shape[-2], trues_raw.shape[-1])
 
         # result save
         folder_path = './results/' + setting + '/'
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
-        mae, mse, rmse, mape, mspe, rse, corr = metric(preds, trues)
+        metric_preds = preds_raw if log_return else self._inverse_target_values(test_data, preds)
+        metric_trues = trues_raw if log_return else self._inverse_target_values(test_data, trues)
+        mae, mse, rmse, mape, mspe, rse, corr = metric(metric_preds, metric_trues)
         print('mse:{}, mae:{}, rse:{}'.format(mse, mae, rse))
         f = open("result.txt", 'a')
         f.write(setting + "  \n")
@@ -332,6 +378,12 @@ class Exp_Main(Exp_Basic):
         f.write('\n')
         f.write('\n')
         f.close()
+
+        visual(
+            metric_trues[:, 0, 0],
+            metric_preds[:, 0, 0],
+            os.path.join(folder_path, 'entire_test_set_raw.pdf')
+        )
 
         # np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe,rse, corr]))
         np.save(folder_path + 'pred.npy', preds)
@@ -343,8 +395,7 @@ class Exp_Main(Exp_Basic):
         pred_data, pred_loader = self._get_data(flag='pred')
 
         if load:
-            path = os.path.join(self.args.checkpoints, setting)
-            best_model_path = path + '/' + 'checkpoint.pth'
+            best_model_path = self._resolve_checkpoint_path(setting)
             self.model.load_state_dict(torch.load(best_model_path))
 
         preds = []
