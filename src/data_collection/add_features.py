@@ -36,6 +36,13 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     df["log_return_1"] = np.log(df["close"] / df["close"].shift(1))
     df["log_return_5"] = np.log(df["close"] / df["close"].shift(5))
     df["log_return_15"] = np.log(df["close"] / df["close"].shift(15))
+    df["log_return_30"] = np.log(df["close"] / df["close"].shift(30))
+    df["log_return_60"] = np.log(df["close"] / df["close"].shift(60))
+    df["future_log_return_1"] = np.log(df["close"].shift(-1) / df["close"])
+    df["future_log_return_5"] = np.log(df["close"].shift(-5) / df["close"])
+    df["future_log_return_15"] = np.log(df["close"].shift(-15) / df["close"])
+    df["future_log_return_30"] = np.log(df["close"].shift(-30) / df["close"])
+    df["future_log_return_60"] = np.log(df["close"].shift(-60) / df["close"])
     df["hl_range"] = (df["high"] - df["low"]) / df["close"]
     df["volume_change"] = np.log(df["volume"] + 1).diff()
 

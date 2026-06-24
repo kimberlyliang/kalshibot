@@ -200,7 +200,7 @@ class Dataset_ETT_minute(Dataset):
 class Dataset_Custom(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='ETTh1.csv',
-                 target='OT', scale=True, timeenc=0, freq='h', offset=0):
+                 target='OT', scale=True, timeenc=0, freq='h', horizon=1):
         # size [seq_len, label_len, pred_len]
         # info
         if size == None:
@@ -224,6 +224,7 @@ class Dataset_Custom(Dataset):
         self.offset = offset
         self.root_path = root_path
         self.data_path = data_path
+        self.horizon = horizon
         self.__read_data__()
 
     def __read_data__(self):
@@ -253,6 +254,8 @@ class Dataset_Custom(Dataset):
         border2s = [num_train, num_train + num_vali, len(df_raw)]
         border1 = border1s[self.set_type]
         border2 = border2s[self.set_type]
+        self.border1 = border1
+        self.border2 = border2
 
         if self.features == 'M' or self.features == 'MS':
             #cols_data = df_raw.columns[1:]
@@ -263,6 +266,9 @@ class Dataset_Custom(Dataset):
             df_data = df_raw[cols_data]
         elif self.features == 'S':
             df_data = df_raw[[self.target]]
+        self.target_idx = df_data.columns.get_loc(self.target)
+        # store the raw close prices to use later if we did a log return
+        self.raw_close = df_raw['close'].astype(np.float32).to_numpy()
         if self.scale:
             train_data = df_data[border1s[0]:border2s[0]]
             self.scaler.fit(train_data.values)
@@ -295,21 +301,54 @@ class Dataset_Custom(Dataset):
     def __getitem__(self, index):
         s_begin = index
         s_end = s_begin + self.seq_len
-        r_begin = s_end - self.label_len + self.offset
-        r_end = r_begin + self.label_len + self.pred_len
 
+        # Encoder input:
+        # data[s_begin : s_end]
+        # Last known input point is s_end - 1
         seq_x = self.data_x[s_begin:s_end]
-        seq_y = self.data_y[r_begin:r_end]
         seq_x_mark = self.data_stamp[s_begin:s_end]
-        seq_y_mark = self.data_stamp[r_begin:r_end]
+
+        # Decoder known context:
+        # last label_len known points from the input window
+        label_begin = s_end - self.label_len
+        label_end = s_end
+
+        # Future target:
+        # horizon steps after the last input point
+        target_begin = (s_end - 1) + self.horizon
+        target_end = target_begin + self.pred_len
+
+        seq_y_label = self.data_y[label_begin:label_end]
+        seq_y_target = self.data_y[target_begin:target_end]
+
+        seq_y = np.concatenate([seq_y_label, seq_y_target], axis=0)
+
+        seq_y_mark_label = self.data_stamp[label_begin:label_end]
+        seq_y_mark_target = self.data_stamp[target_begin:target_end]
+
+        seq_y_mark = np.concatenate([seq_y_mark_label, seq_y_mark_target], axis=0)
 
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
-        return len(self.data_x) - self.seq_len - self.pred_len - self.offset + 1
+        return len(self.data_x) - self.seq_len - self.horizon - self.pred_len + 2
 
     def inverse_transform(self, data):
         return self.scaler.inverse_transform(data)
+
+    def inverse_transform_target(self, values):
+        values = np.asarray(values, dtype=np.float32)
+        if not self.scale:
+            return values
+        return values * self.scaler.scale_[self.target_idx] + self.scaler.mean_[self.target_idx]
+
+    def get_raw_close_history(self, index):
+        global_start = self.border1 + index
+        return self.raw_close[global_start:global_start + self.seq_len]
+
+    def get_last_raw_close(self, index):
+        global_idx = self.border1 + index + self.seq_len - 1
+        return float(self.raw_close[global_idx])
     
 
 class Dataset_Pred(Dataset):
@@ -348,14 +387,15 @@ class Dataset_Pred(Dataset):
         '''
         df_raw.columns: ['date', ...(other features), target feature]
         '''
+        time_col = _pick_time_column(df_raw)
+
         if self.cols:
             cols = self.cols.copy()
             cols.remove(self.target)
         else:
-            cols = list(df_raw.columns)
-            cols.remove(self.target)
-            cols.remove('date')
-        df_raw = df_raw[['date'] + cols + [self.target]]
+            cols = [col for col in df_raw.columns if col not in (time_col, self.target)]
+
+        df_raw = df_raw[[time_col] + cols + [self.target]]
         border1 = len(df_raw) - self.seq_len
         border2 = len(df_raw)
 
@@ -373,7 +413,7 @@ class Dataset_Pred(Dataset):
 
         tmp_stamp = df_raw[['date']][border1:border2]
         tmp_stamp['date'] = pd.to_datetime(tmp_stamp.date)
-        
+
         last_date = pd.to_datetime(tmp_stamp.date.values[-1])
         freq_offset = pd.tseries.frequencies.to_offset(self.freq)
 

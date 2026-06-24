@@ -14,14 +14,14 @@ data_name="custom"                         # use custom data loader path in trai
 # BTC minute data setup
 root_path_name="$REPO_ROOT"
 data_path_name="data/btc_minutes_100000_with_features.csv"
-target_name="close"
+target_name="future_log_return_60"
 freq_name="min"                            # minute frequency
 
-# 240-minute context -> 60-minute horizon and 1-minute forecast
+# 240-minute context -> 60-minute horizon -> 1-minute forecast
 seq_len=240
-label_len=30
+label_len=1
 pred_len=1
-horizon=60  # 60-minute horizon
+horizon=0
 
 random_seed=2021
 
@@ -40,8 +40,8 @@ python -u "$SCRIPT_DIR/run_longExp.py" \
   --label_len "$label_len" \
   --pred_len "$pred_len" \
   --horizon "$horizon" \
-  --enc_in 5 \
-  --dec_in 5 \
+  --enc_in 20 \
+  --dec_in 20 \
   --c_out 1 \
   --e_layers 4 \
   --n_heads 4 \
@@ -50,12 +50,14 @@ python -u "$SCRIPT_DIR/run_longExp.py" \
   --dropout 0.05 \
   --fc_dropout 0.05 \
   --head_dropout 0.1 \
-  --patch_len 3 \
-  --stride 1 \
-  --des "BTCM_240to10_mse_more_features" \
+  --patch_len 4 \
+  --stride 2 \
+  --des "BTCM_240to1_mse_more_features_and_log_return_60" \
   --train_epochs 10 \
   --itr 1 \
   --batch_size 128 \
-  --learning_rate 0.001 \
+  --learning_rate 0.0001 \
+  --log_return True \
   --loss "mse" \
+  --patience 5 \
   > "$LOG_DIR/${model_name}_${model_id_name}_${seq_len}_${pred_len}.log"

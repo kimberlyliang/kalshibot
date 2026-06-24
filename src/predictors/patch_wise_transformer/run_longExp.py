@@ -27,6 +27,8 @@ if __name__ == '__main__':
     parser.add_argument('--freq', type=str, default='h',
                         help='freq for time features encoding, options:[s:secondly, t:minutely, h:hourly, d:daily, b:business days, w:weekly, m:monthly], you can also use more detailed freq like 15min or 3h')
     parser.add_argument('--checkpoints', type=str, default='./checkpoints/', help='location of model checkpoints')
+    parser.add_argument('--checkpoint_path', type=str, default='',
+                        help='optional checkpoint file or directory to load for test/predict')
 
     # forecasting task
     parser.add_argument('--seq_len', type=int, default=96, help='input sequence length')
@@ -34,7 +36,10 @@ if __name__ == '__main__':
     parser.add_argument('--pred_len', type=int, default=96, help='prediction sequence length')
     parser.add_argument('--horizon', type=int, default=1, help='horizon')
 
-
+    parser.add_argument('--log_return', type=bool, default=False, help='log return')
+    parser.add_argument('--plot_chunk_size', type=int, default=100, help='test plot chunk size')
+    parser.add_argument('--plot_chunk_starts', type=str, default='0,1000',
+                        help='comma-separated test plot chunk start indices')
     # DLinear
     #parser.add_argument('--individual', action='store_true', default=False, help='DLinear: a linear layer for each variate(channel) individually')
 
