@@ -17,10 +17,11 @@ data_path_name="data/btc_minutes_100000_with_features.csv"
 target_name="close"
 freq_name="min"                            # minute frequency
 
-# 120-minute context -> 60-minute forecast
+# 240-minute context -> 60-minute horizon and 1-minute forecast
 seq_len=240
-label_len=10
-pred_len=10
+label_len=30
+pred_len=1
+horizon=60  # 60-minute horizon
 
 random_seed=2021
 
@@ -38,6 +39,7 @@ python -u "$SCRIPT_DIR/run_longExp.py" \
   --seq_len "$seq_len" \
   --label_len "$label_len" \
   --pred_len "$pred_len" \
+  --horizon "$horizon" \
   --enc_in 5 \
   --dec_in 5 \
   --c_out 1 \

@@ -57,7 +57,7 @@ def _fetch_coinbase(n: int) -> pd.DataFrame:
         df[col] = df[col].astype(float)
 
     df["open_time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-    df["close_time"] = df["open_time"] + pd.Timedelta(hours=1)
+    df["close_time"] = df["open_time"] + pd.Timedelta(minutes=1)
 
     return df[
         [

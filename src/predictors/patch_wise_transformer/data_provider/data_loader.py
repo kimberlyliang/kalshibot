@@ -200,7 +200,7 @@ class Dataset_ETT_minute(Dataset):
 class Dataset_Custom(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='ETTh1.csv',
-                 target='OT', scale=True, timeenc=0, freq='h'):
+                 target='OT', scale=True, timeenc=0, freq='h', offset=0):
         # size [seq_len, label_len, pred_len]
         # info
         if size == None:
@@ -221,7 +221,7 @@ class Dataset_Custom(Dataset):
         self.scale = scale
         self.timeenc = timeenc
         self.freq = freq
-
+        self.offset = offset
         self.root_path = root_path
         self.data_path = data_path
         self.__read_data__()
@@ -295,7 +295,7 @@ class Dataset_Custom(Dataset):
     def __getitem__(self, index):
         s_begin = index
         s_end = s_begin + self.seq_len
-        r_begin = s_end - self.label_len
+        r_begin = s_end - self.label_len + self.offset
         r_end = r_begin + self.label_len + self.pred_len
 
         seq_x = self.data_x[s_begin:s_end]
@@ -306,7 +306,7 @@ class Dataset_Custom(Dataset):
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
-        return len(self.data_x) - self.seq_len - self.pred_len + 1
+        return len(self.data_x) - self.seq_len - self.pred_len - self.offset + 1
 
     def inverse_transform(self, data):
         return self.scaler.inverse_transform(data)
@@ -315,7 +315,7 @@ class Dataset_Custom(Dataset):
 class Dataset_Pred(Dataset):
     def __init__(self, root_path, flag='pred', size=None,
                  features='S', data_path='ETTh1.csv',
-                 target='OT', scale=True, inverse=False, timeenc=0, freq='15min', cols=None):
+                 target='OT', scale=True, inverse=False, timeenc=0, freq='15min', cols=None, horizon=1):
         # size [seq_len, label_len, pred_len]
         # info
         if size == None:
@@ -338,6 +338,7 @@ class Dataset_Pred(Dataset):
         self.cols = cols
         self.root_path = root_path
         self.data_path = data_path
+        self.horizon = horizon
         self.__read_data__()
 
     def __read_data__(self):
@@ -372,10 +373,21 @@ class Dataset_Pred(Dataset):
 
         tmp_stamp = df_raw[['date']][border1:border2]
         tmp_stamp['date'] = pd.to_datetime(tmp_stamp.date)
-        pred_dates = pd.date_range(tmp_stamp.date.values[-1], periods=self.pred_len + 1, freq=self.freq)
+        
+        last_date = pd.to_datetime(tmp_stamp.date.values[-1])
+        freq_offset = pd.tseries.frequencies.to_offset(self.freq)
+
+        pred_start = last_date + self.horizon * freq_offset
+
+        pred_dates = pd.date_range(
+            pred_start,
+            periods=self.pred_len,
+            freq=self.freq
+        )
 
         df_stamp = pd.DataFrame(columns=['date'])
-        df_stamp.date = list(tmp_stamp.date.values) + list(pred_dates[1:])
+        df_stamp.date = list(tmp_stamp.date.values) + list(pred_dates)
+
         if self.timeenc == 0:
             df_stamp['month'] = df_stamp.date.apply(lambda row: row.month, 1)
             df_stamp['day'] = df_stamp.date.apply(lambda row: row.day, 1)
@@ -398,16 +410,26 @@ class Dataset_Pred(Dataset):
     def __getitem__(self, index):
         s_begin = index
         s_end = s_begin + self.seq_len
-        r_begin = s_end - self.label_len
-        r_end = r_begin + self.label_len + self.pred_len
 
         seq_x = self.data_x[s_begin:s_end]
-        if self.inverse:
-            seq_y = self.data_x[r_begin:r_begin + self.label_len]
-        else:
-            seq_y = self.data_y[r_begin:r_begin + self.label_len]
         seq_x_mark = self.data_stamp[s_begin:s_end]
-        seq_y_mark = self.data_stamp[r_begin:r_end]
+
+        # Known decoder context from the end of the input window
+        label_begin = s_end - self.label_len
+        label_end = s_end
+
+        if self.inverse:
+            seq_y = self.data_x[label_begin:label_end]
+        else:
+            seq_y = self.data_y[label_begin:label_end]
+
+        # data_stamp has:
+        # first seq_len rows = historical timestamps
+        # last pred_len rows = future horizon timestamps
+        seq_y_mark_label = self.data_stamp[label_begin:label_end]
+        seq_y_mark_future = self.data_stamp[self.seq_len:self.seq_len + self.pred_len]
+
+        seq_y_mark = np.concatenate([seq_y_mark_label, seq_y_mark_future], axis=0)
 
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
